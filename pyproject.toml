@@ -1,0 +1,56 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ragcompactor"
+version = "0.1.0"
+description = "Local RAG memory compactor and deduplicator - merges redundant vector-store chunks to cut token usage and storage"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Shantanu Somwanshi" }]
+keywords = ["rag", "vector-database", "deduplication", "embeddings", "llm", "tokens"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+dependencies = [
+    "numpy>=1.24",
+    "networkx>=3.0",
+    "pydantic>=2.5",
+    "typer>=0.9",
+]
+
+[project.optional-dependencies]
+# Vector store backend
+chroma = ["chromadb>=0.4.22"]
+# Local embedding model
+embed = ["sentence-transformers>=2.3"]
+# Hosted / local LLM routing for the summarization step
+llm = ["litellm>=1.30"]
+# Accurate token accounting for the benchmark
+tokens = ["tiktoken>=0.5"]
+# PDF ingestion
+pdf = ["pypdf>=4.0"]
+# Everything needed for a real run
+all = [
+    "chromadb>=0.4.22",
+    "sentence-transformers>=2.3",
+    "litellm>=1.30",
+    "tiktoken>=0.5",
+    "pypdf>=4.0",
+]
+dev = ["pytest>=7.4", "pytest-cov>=4.1"]
+
+[project.scripts]
+ragcompactor = "ragcompactor.cli:app"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
