@@ -1,6 +1,6 @@
 from ragcompactor.compactor import Compactor
-from ragcompactor.models import Chunk
-from ragcompactor.summarize import StubSummarizer, build_prompt
+from ragcompactor.core import Chunk
+from ragcompactor.backends import StubSummarizer, build_prompt
 from tests.conftest import DISTINCT_TEXTS, DUPLICATE_TEXTS
 
 

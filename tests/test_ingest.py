@@ -1,5 +1,5 @@
 from ragcompactor.ingest import chunk_file, chunk_paths, normalize, split_text
-from ragcompactor.models import Chunk
+from ragcompactor.core import Chunk
 
 
 def test_normalize_collapses_whitespace_and_blank_lines():

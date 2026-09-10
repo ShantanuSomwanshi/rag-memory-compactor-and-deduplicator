@@ -11,16 +11,14 @@ Two numbers matter, and the second is the one that survives scrutiny:
 * context tokens per query - how much text top-k retrieval drags into the
   prompt, before and after;
 * break-even - compaction spends tokens on summarization, so the win only
-  starts after enough queries have amortized that one-off cost.
-"""
+  starts after enough queries have amortized that one-off cost."""
 
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 
-from ragcompactor.embeddings import Embedder
-from ragcompactor.store import VectorStore
-from ragcompactor.tokens import count_tokens, tokenizer_is_exact
+from ragcompactor.backends import Embedder, VectorStore
+from ragcompactor.core import count_tokens, tokenizer_is_exact
 
 
 @dataclass
@@ -201,8 +199,15 @@ def build_report(
         exact_tokenizer=tokenizer_is_exact(token_model),
     )
     if compaction_tokens == 0:
-        report.notes.append(
-            "compaction cost was 0 - the stub summarizer makes no API call, so "
-            "break-even is not meaningful for this run"
-        )
+        if before_corpus.chunks == after_corpus.chunks:
+            report.notes.append(
+                "nothing was merged - the store was already compacted, or no group "
+                "cleared the validation gate. Undo previous runs and re-run this "
+                "benchmark on an uncompacted store to get a real comparison"
+            )
+        else:
+            report.notes.append(
+                "compaction cost was 0 - the stub summarizer makes no API call, so "
+                "break-even is not meaningful for this run"
+            )
     return report

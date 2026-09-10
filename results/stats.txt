@@ -1,0 +1,19 @@
+{
+  "chunks": 126,
+  "merged_chunks": 0,
+  "archive": {
+    "runs": 1,
+    "merges": 0,
+    "undone": 0,
+    "archived_chunks": 0
+  },
+  "sources": {
+    "roots": [
+      "C:/Users/hp/Desktop/college/miniproject/ragcompactor/data"
+    ],
+    "files": 7,
+    "chunks": 126,
+    "missing_files": [],
+    "path": ".ragcompactor\\ingested.json"
+  }
+}

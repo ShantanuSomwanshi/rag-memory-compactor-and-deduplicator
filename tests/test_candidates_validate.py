@@ -1,10 +1,10 @@
 import numpy as np
 
-from ragcompactor.candidates import find_candidate_groups, group_stats, pairwise_matrix
-from ragcompactor.embeddings import HashingEmbedder
-from ragcompactor.models import CandidateGroup, Chunk
-from ragcompactor.store import InMemoryStore
-from ragcompactor.validate import largest_valid_subset, validate_group
+from ragcompactor.pipeline import find_candidate_groups, group_stats, pairwise_matrix
+from ragcompactor.backends import HashingEmbedder
+from ragcompactor.core import CandidateGroup, Chunk
+from ragcompactor.backends import InMemoryStore
+from ragcompactor.pipeline import largest_valid_subset, validate_group
 from tests.conftest import DISTINCT_TEXTS, DUPLICATE_TEXTS
 
 

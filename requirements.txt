@@ -1,0 +1,27 @@
+# Everything needed to run ragcompactor as configured by `ragcompactor init`.
+#   pip install -r requirements.txt
+#
+# This mirrors pyproject.toml's dependencies + the "all" extra. Installing the
+# package itself (pip install -e .) is still what puts the CLI on your PATH.
+
+# --- core ---------------------------------------------------------------
+numpy>=1.24
+networkx>=3.0
+pydantic>=2.5
+typer>=0.9
+python-dotenv>=1.0
+
+# --- vector store -------------------------------------------------------
+chromadb>=0.4.22
+
+# --- embedding model ----------------------------------------------------
+sentence-transformers>=2.3
+
+# --- LLM routing (any provider: groq, openai, anthropic, ollama, ...) ----
+litellm>=1.30
+
+# --- token accounting for the benchmark ---------------------------------
+tiktoken>=0.5
+
+# --- PDF ingestion ------------------------------------------------------
+pypdf>=4.0

@@ -8,9 +8,7 @@ from ragcompactor.benchmark import (
     retrieval_stats,
 )
 from ragcompactor.compactor import Compactor
-from ragcompactor.config import CompactorConfig
-from ragcompactor.models import Chunk
-from ragcompactor.tokens import count_tokens
+from ragcompactor.core import Chunk, CompactorConfig, count_tokens
 from tests.conftest import DISTINCT_TEXTS, DUPLICATE_TEXTS
 
 

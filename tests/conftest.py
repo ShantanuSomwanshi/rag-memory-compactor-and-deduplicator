@@ -3,9 +3,8 @@ import math
 import numpy as np
 import pytest
 
-from ragcompactor.config import CompactorConfig
-from ragcompactor.models import Chunk
-from ragcompactor.store import InMemoryStore
+from ragcompactor.core import Chunk, CompactorConfig
+from ragcompactor.backends import InMemoryStore
 
 
 @pytest.fixture

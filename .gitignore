@@ -14,3 +14,8 @@ htmlcov/
 .ragcompactor/
 *.sqlite3
 chroma/
+ragcompactor.json
+
+# your corpus - keep the folder, ignore everything you put in it
+data/*
+!data/.gitkeep

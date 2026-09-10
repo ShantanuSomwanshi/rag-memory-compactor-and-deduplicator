@@ -2,14 +2,16 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
+import json
 
 import typer
 
-from ragcompactor import benchmark as bench
+from ragcompactor.backends import get_summarizer
 from ragcompactor.compactor import Compactor
-from ragcompactor.config import CompactorConfig
+from ragcompactor.core import CompactorConfig
+from ragcompactor import benchmark as bench
+
 
 app = typer.Typer(
     add_completion=False,
@@ -17,6 +19,20 @@ app = typer.Typer(
 )
 
 DEFAULT_CONFIG = Path("ragcompactor.json")
+
+
+@app.callback()
+def _bootstrap() -> None:
+    """Load .env before any command runs.
+
+    Real environment variables win over the file (``override=False``), so an
+    exported key still takes precedence over a stale one committed by mistake.
+    """
+    try:
+        from dotenv import load_dotenv
+    except ImportError:  # pragma: no cover - dotenv is a core dep, but be safe
+        return
+    load_dotenv(override=False)
 
 
 def _load_config(config_path: Path | None) -> CompactorConfig:
@@ -57,11 +73,70 @@ def init(
 def ingest(
     paths: list[Path] = typer.Argument(..., help="Files or directories to ingest."),
     config: Path = ConfigOpt,
+    force: bool = typer.Option(
+        False,
+        "--force",
+        help="Re-ingest everything, ignoring the ledger. Use after changing "
+        "chunk_size or the embedding model.",
+    ),
+    json_out: bool = typer.Option(False, "--json"),
 ) -> None:
-    """Chunk, embed and store documents."""
+    """Chunk, embed and store documents, skipping sources already ingested."""
     with _compactor(config) as c:
-        added = c.ingest(list(paths))
-        typer.echo(f"ingested {added} chunks; store now holds {c.store.count()}")
+        report = c.ingest(list(paths), force=force)
+        if json_out:
+            typer.echo(json.dumps(report.to_dict(), indent=2))
+            return
+        d = report.to_dict()
+        typer.echo(f"scanned {d['files_seen']} file(s)")
+        typer.echo(f"  new        {d['added_files']}")
+        typer.echo(f"  changed    {d['updated_files']}")
+        typer.echo(f"  unchanged  {d['skipped_files']} (skipped)")
+        typer.echo(f"  chunks     +{d['chunks_added']} / -{d['chunks_removed']}")
+        typer.echo(f"  store now holds {c.store.count()} chunks")
+        if d["stale_merges"]:
+            typer.echo(
+                f"\n  WARNING: {len(d['stale_merges'])} existing merge(s) contain text from "
+                "files that have since changed."
+            )
+            typer.echo("  Those summaries still carry the superseded wording. Undo them with:")
+            for merge_id in d["stale_merges"]:
+                typer.echo(f"    ragcompactor undo --merge {merge_id}")
+
+
+@app.command()
+def sources(config: Path = ConfigOpt) -> None:
+    """List the folders and files recorded as ingested."""
+    with _compactor(config) as c:
+        summary = c.ledger.summary()
+        typer.echo(f"ledger: {summary['path']}")
+        typer.echo(f"  {summary['files']} file(s), {summary['chunks']} chunk(s)")
+        if summary["roots"]:
+            typer.echo("\nfolders ingested:")
+            for root in summary["roots"]:
+                typer.echo(f"  {root}")
+        if summary["files"]:
+            typer.echo("\nfiles:")
+            for path in c.ledger.known_files():
+                record = c.ledger.files[path]
+                flag = "" if Path(path).exists() else "   [missing on disk]"
+                typer.echo(f"  {record['chunk_count']:>4} chunks  {path}{flag}")
+        if summary["missing_files"]:
+            typer.echo(
+                f"\n{len(summary['missing_files'])} recorded source(s) no longer exist. "
+                "Drop one with: ragcompactor forget <path>"
+            )
+
+
+@app.command()
+def forget(
+    path: Path = typer.Argument(..., help="Source file to drop from the store."),
+    config: Path = ConfigOpt,
+) -> None:
+    """Remove a source's chunks from the store and forget it in the ledger."""
+    with _compactor(config) as c:
+        removed = c.forget_source(path)
+        typer.echo(f"removed {removed} chunk(s); store now holds {c.store.count()}")
 
 
 @app.command()
@@ -71,9 +146,18 @@ def compact(
         False, "--dry-run", help="Report what would merge without calling the LLM or writing."
     ),
     json_out: bool = typer.Option(False, "--json", help="Emit the report as JSON."),
+    throttle: float = typer.Option(
+        None,
+        "--throttle",
+        help="Seconds to wait between LLM calls, to stay under a provider's "
+        "tokens-per-minute cap. Groq's free tier needs about 8.",
+    ),
 ) -> None:
     """Find, validate and merge redundant chunks."""
     with _compactor(config) as c:
+        if throttle is not None:
+            c.config.llm_request_delay = throttle
+            c.summarizer = get_summarizer(c.config)
         report = c.compact(dry_run=dry_run)
         if json_out:
             typer.echo(json.dumps(report.to_dict(), indent=2))
@@ -87,6 +171,10 @@ def compact(
                    f"({d['reduction_pct']}% smaller)")
         typer.echo(f"  archived           {d['chunks_archived']}")
         typer.echo(f"  summarizer tokens  {d['summarization_tokens']}")
+        if d["failed_groups"]:
+            typer.echo(f"  FAILED groups      {d['failed_groups']}")
+            typer.echo(f"    last error: {d['last_error']}")
+            typer.echo("    completed merges are committed - re-run to continue.")
         if not dry_run and report.merges:
             typer.echo(f"  undo with: ragcompactor undo --run {report.run_id}")
 
@@ -149,6 +237,12 @@ def benchmark(
     sample_queries: int = typer.Option(
         12, help="If no queries file is given, derive this many queries from the corpus."
     ),
+    throttle: float = typer.Option(
+        None,
+        "--throttle",
+        help="Seconds between LLM calls during the compaction step, to stay under "
+        "a provider's tokens-per-minute cap. Groq's free tier needs about 8.",
+    ),
     json_out: bool = typer.Option(False, "--json"),
 ) -> None:
     """Measure tokens before and after compaction, and the break-even point.
@@ -158,9 +252,15 @@ def benchmark(
     """
     with _compactor(config) as c:
         cfg = c.config
+        if throttle is not None:
+            cfg.llm_request_delay = throttle
+            c.summarizer = get_summarizer(cfg)
         if ingest_paths:
-            added = c.ingest(list(ingest_paths))
-            typer.echo(f"ingested {added} chunks\n")
+            ingested = c.ingest(list(ingest_paths))
+            typer.echo(
+                f"ingested {ingested.chunks_added} chunks "
+                f"({ingested.skipped_files} unchanged file(s) skipped)\n"
+            )
 
         queries: list[str]
         if queries_file:
@@ -168,8 +268,18 @@ def benchmark(
         else:
             # Derive stand-in queries from the corpus itself so the benchmark
             # runs without hand-written questions. Real queries are better.
-            texts = [ch.text for ch in c.store.all_chunks()][:sample_queries]
-            queries = [" ".join(t.split()[:12]) for t in texts if t.strip()]
+            #
+            # Sample at an even stride across the whole store rather than taking
+            # the first N chunks: store order groups chunks by document, so the
+            # first N would all come from one file and would measure only that
+            # corner of the corpus.
+            all_chunks = [ch for ch in c.store.all_chunks() if ch.text.strip()]
+            if 0 < sample_queries < len(all_chunks):
+                step = len(all_chunks) / sample_queries
+                picked = [all_chunks[int(i * step)] for i in range(sample_queries)]
+            else:
+                picked = all_chunks
+            queries = [" ".join(ch.text.split()[:12]) for ch in picked]
 
         if not queries:
             typer.echo("no queries available - ingest documents first")
@@ -214,7 +324,7 @@ def demo(
     Runs fully offline - hashing embedder, in-memory store, stub summarizer - so
     it works with no API key and no model download.
     """
-    from ragcompactor.models import Chunk
+    from ragcompactor.core import Chunk
 
     base = [
         "The compactor merges redundant chunks in a vector store to reduce token usage.",

@@ -4,20 +4,20 @@ Compaction is lossy by construction: several chunks become one. That is only
 safe to run unattended if the originals survive, so every merge writes its
 source chunks - text, metadata and embedding vector - here before they leave the
 live store. Keeping the vector means an undo restores the exact original
-embedding instead of re-embedding (which could drift with a model change).
-"""
+embedding instead of re-embedding (which could drift with a model change)."""
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
+from pathlib import Path
 import json
 import sqlite3
 import uuid
-from datetime import datetime, timezone
-from pathlib import Path
 
 import numpy as np
 
-from ragcompactor.models import Chunk, MergeRecord
+from ragcompactor.core import Chunk, MergeRecord
+
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS runs (
@@ -195,6 +195,29 @@ class Archive:
             )
             out.append((chunk, vector))
         return out
+
+    def merges_containing(self, chunk_ids: list[str]) -> list[str]:
+        """Ids of live merges that consumed any of these chunks.
+
+        Used when a source file is re-ingested after an edit: its earlier chunks
+        may already have been folded into a summary, and that summary still
+        carries the superseded text.
+        """
+        if not chunk_ids:
+            return []
+        out: list[str] = []
+        # chunked IN clauses keep well clear of SQLite's variable limit
+        for i in range(0, len(chunk_ids), 400):
+            batch = chunk_ids[i : i + 400]
+            placeholders = ",".join("?" * len(batch))
+            rows = self._conn.execute(
+                "SELECT DISTINCT o.merge_id FROM originals o"
+                " JOIN merges m ON m.merge_id = o.merge_id"
+                f" WHERE m.undone = 0 AND o.chunk_id IN ({placeholders})",
+                tuple(batch),
+            ).fetchall()
+            out.extend(r["merge_id"] for r in rows)
+        return sorted(set(out))
 
     def mark_undone(self, merge_id: str) -> None:
         self._conn.execute("UPDATE merges SET undone = 1 WHERE merge_id = ?", (merge_id,))

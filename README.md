@@ -52,12 +52,26 @@ The weak members are dropped and the tight core still merges.
 ## Install
 
 ```bash
-pip install -e ".[all]"        # chroma + sentence-transformers + litellm + tiktoken + pypdf
-pip install -e ".[dev]"        # pytest
+pip install -r requirements.txt      # or: pip install -e ".[all]"
+pip install -e .                     # puts the ragcompactor command on PATH
 ```
 
-Extras are granular if you want a smaller install: `chroma`, `embed`, `llm`,
-`tokens`, `pdf`.
+For development: `pip install -r requirements-dev.txt`. Extras are granular if
+you want a smaller install: `chroma`, `embed`, `llm`, `tokens`, `pdf`.
+
+## API keys
+
+Copy `.env.example` to `.env` and fill in the key for whichever provider your
+`llm_model` uses. Every command loads `.env` automatically, and `.env` is
+gitignored so keys are never committed:
+
+```bash
+cp .env.example .env      # then edit it
+```
+
+A real environment variable still wins over the file. If the key a model needs
+is missing, the run stops immediately with a message naming the variable,
+rather than failing once per merge.
 
 ## Quick start
 
@@ -66,6 +80,7 @@ ragcompactor demo                          # offline end-to-end: seed, compact, 
 
 ragcompactor init                          # writes ragcompactor.json
 ragcompactor ingest ./notes ./papers
+ragcompactor sources                       # what has been ingested already
 ragcompactor compact --dry-run             # what would merge, no LLM call, no writes
 ragcompactor compact
 ragcompactor runs
@@ -75,6 +90,74 @@ ragcompactor undo --last
 `demo` runs fully offline - hashing embedder, in-memory store, stub summarizer -
 so it needs no API key and no model download. It also deliberately shows the
 validation gate refining an over-broad group.
+
+## Incremental ingestion
+
+Put your corpus in `data/` (or anywhere else — `ingest` takes any path and walks
+directories recursively). These extensions are picked up; anything else in the
+folder is skipped rather than causing an error:
+
+| Extension | Notes |
+| --- | --- |
+| `.txt` `.md` `.markdown` `.rst` | Read directly |
+| `.pdf` | Needs the `pdf` extra |
+| `.csv` `.json` `.log` `.py` | Read as plain text |
+
+Note that `.md` is on that list, so keep notes-about-the-corpus out of the
+corpus folder — they would be ingested along with everything else.
+
+`ingest` keeps a ledger at `<workdir>/ingested.json` recording every folder and
+file it has taken in, with each file's content hash and the chunk ids it
+produced. Re-running `ingest` on the same folder skips unchanged files entirely.
+
+```bash
+ragcompactor ingest ./data      # first run: 40 new files
+ragcompactor ingest ./data      # second run: 40 unchanged, skipped
+ragcompactor sources            # list ingested folders and files
+ragcompactor ingest ./data --force   # ignore the ledger and redo everything
+ragcompactor forget ./data/old.md    # drop one source and its chunks
+```
+
+Chunk ids are content-addressed, so re-adding an identical chunk is already
+harmless. The ledger is there for the three things that does *not* cover:
+
+- **Cost.** Skipping an unchanged file avoids re-reading it, re-parsing a PDF,
+  re-chunking and — by far the most expensive part — re-embedding it.
+- **Edited files.** When a file changes, its old chunks keep their old ids and
+  would sit in the store forever with no source behind them. The ledger knows
+  which ids came from which file, so they are removed before the new ones land.
+- **Accidentally undoing a compaction.** After a merge the originals are
+  archived and deleted from the store. Re-ingesting that source file would
+  regenerate exactly those ids and silently put the duplicates back. Skipping
+  already-ingested files prevents it.
+
+Files are matched by content hash rather than timestamp, so a touched or
+restored file is correctly seen as unchanged, and an edit made within the same
+second is still caught.
+
+Use `--force` after changing `chunk_size`, `chunk_overlap` or the embedding
+model — those invalidate stored chunks without changing any source file.
+
+### Editing a file whose chunks were already merged
+
+If a changed file had chunks folded into a summary, that summary still carries
+the superseded wording. `ingest` detects this and names the affected merges:
+
+```
+WARNING: 1 existing merge(s) contain text from files that have since changed.
+Those summaries still carry the superseded wording. Undo them with:
+  ragcompactor undo --merge 4f2a91c0b7de
+```
+
+Undoing restores the originals, after which the next `compact` re-merges them
+with the updated text.
+
+## New material is compacted against old
+
+`compact` always runs over the whole store, so chunks ingested today are
+compared against everything already in it — a duplicate that spans two separate
+ingestion runs, months apart, is found and merged like any other. Compaction is
+not scoped to the batch you just added.
 
 ## Configuration
 

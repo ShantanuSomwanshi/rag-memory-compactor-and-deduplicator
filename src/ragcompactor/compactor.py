@@ -7,14 +7,21 @@ from pathlib import Path
 import numpy as np
 
 from ragcompactor.archive import Archive
-from ragcompactor.candidates import find_candidate_groups
-from ragcompactor.config import CompactorConfig
-from ragcompactor.embeddings import Embedder, get_embedder
-from ragcompactor.ingest import chunk_paths
-from ragcompactor.models import Chunk, CompactionReport, MergeRecord
-from ragcompactor.store import VectorStore, get_store
-from ragcompactor.summarize import Summarizer, get_summarizer
-from ragcompactor.validate import validate_group
+from ragcompactor.backends import Embedder, Summarizer, VectorStore, get_embedder, get_store, get_summarizer
+from ragcompactor.core import (
+    Chunk,
+    CompactionReport,
+    CompactorConfig,
+    IngestReport,
+    MergeRecord,
+)
+from ragcompactor.ingest import (
+    IngestLedger,
+    chunk_file,
+    file_fingerprint,
+    iter_source_files,
+)
+from ragcompactor.pipeline import find_candidate_groups, validate_group
 
 
 class Compactor:
@@ -27,6 +34,7 @@ class Compactor:
         embedder: Embedder | None = None,
         summarizer: Summarizer | None = None,
         archive: Archive | None = None,
+        ledger: IngestLedger | None = None,
     ) -> None:
         self.config = config or CompactorConfig()
         self.config.ensure_workdir()
@@ -36,6 +44,9 @@ class Compactor:
             summarizer if summarizer is not None else get_summarizer(self.config)
         )
         self.archive = archive if archive is not None else Archive(self.config.archive_path)
+        self.ledger = (
+            ledger if ledger is not None else IngestLedger(self.config.ledger_path)
+        )
 
     # --- ingestion ---------------------------------------------------------
     def add_chunks(self, chunks: list[Chunk]) -> int:
@@ -45,14 +56,68 @@ class Compactor:
         self.store.add(chunks, vectors)
         return len(chunks)
 
-    def ingest(self, paths: list[str | Path]) -> int:
-        """Chunk and embed every supported file under ``paths``."""
-        chunks = chunk_paths(
-            list(paths),
-            chunk_size=self.config.chunk_size,
-            overlap=self.config.chunk_overlap,
-        )
-        return self.add_chunks(chunks)
+    def ingest(self, paths: list[str | Path], force: bool = False) -> IngestReport:
+        """Ingest every supported file under ``paths``, skipping unchanged ones.
+
+        The ledger decides what work is actually done. A file whose content hash
+        matches its recorded one is skipped outright. A file that has changed has
+        its previous chunks removed from the store before the new ones are added,
+        so an edit does not leave orphaned chunks behind.
+
+        ``force`` re-ingests everything regardless of the ledger, which is what
+        you want after changing ``chunk_size`` or swapping the embedding model,
+        since those invalidate stored chunks without changing any source file.
+        """
+        report = IngestReport()
+        stale: set[str] = set()
+
+        for root in paths:
+            self.ledger.record_root(root)
+            report.roots.append(str(root))
+
+            for path in iter_source_files(root):
+                fingerprint = file_fingerprint(path)
+                status = self.ledger.status(path, fingerprint)
+
+                if status == "unchanged" and not force:
+                    report.skipped_files += 1
+                    continue
+
+                # An edited (or force-reingested) file's old chunks must go, or
+                # they linger in the store with no source to justify them.
+                old_ids = self.ledger.chunk_ids_for(path)
+                if old_ids:
+                    present = [i for i in old_ids if self.store.get(i) is not None]
+                    stale.update(self.archive.merges_containing(old_ids))
+                    self.store.delete(old_ids)
+                    report.chunks_removed += len(present)
+
+                chunks = chunk_file(
+                    path,
+                    chunk_size=self.config.chunk_size,
+                    overlap=self.config.chunk_overlap,
+                )
+                self.add_chunks(chunks)
+                self.ledger.record_file(path, fingerprint, [c.id for c in chunks])
+                report.chunks_added += len(chunks)
+
+                if status == "new":
+                    report.added_files += 1
+                else:
+                    report.updated_files += 1
+
+        report.stale_merges = sorted(stale)
+        self.ledger.save()
+        return report
+
+    def forget_source(self, path: str | Path) -> int:
+        """Drop a source from the ledger and remove its chunks from the store."""
+        chunk_ids = self.ledger.forget_file(path)
+        present = [i for i in chunk_ids if self.store.get(i) is not None]
+        if chunk_ids:
+            self.store.delete(chunk_ids)
+        self.ledger.save()
+        return len(present)
 
     # --- compaction --------------------------------------------------------
     def _merged_chunk(self, text: str, originals: list[Chunk], run_id: str) -> Chunk:
@@ -112,7 +177,19 @@ class Compactor:
                 report.chunks_merged += len(originals)
                 continue
 
-            result = self.summarizer.summarize([c.text for c in originals])
+            try:
+                result = self.summarizer.summarize([c.text for c in originals])
+            except Exception as exc:
+                # A provider failure (rate limit, timeout, outage) must not throw
+                # away the merges this run has already committed. Record it, and
+                # give up only once failures look persistent rather than isolated.
+                report.failed_groups += 1
+                report.validated_groups -= 1
+                report.last_error = f"{type(exc).__name__}: {exc}"[:300]
+                if report.failed_groups >= cfg.max_group_failures:
+                    break
+                continue
+
             report.summarization_tokens += result.total_tokens
             if not result.text.strip():
                 report.rejected_groups += 1
@@ -184,6 +261,7 @@ class Compactor:
             "chunks": len(chunks),
             "merged_chunks": len(merged),
             "archive": self.archive.stats(),
+            "sources": self.ledger.summary(),
         }
 
     def close(self) -> None:
