@@ -44,7 +44,7 @@ all = [
     "tiktoken>=0.5",
     "pypdf>=4.0",
 ]
-dev = ["pytest>=7.4", "pytest-cov>=4.1"]
+dev = ["pytest>=7.4", "pytest-cov>=4.1", "py>=1.11"]
 
 [project.scripts]
 ragcompactor = "ragcompactor.cli:app"
