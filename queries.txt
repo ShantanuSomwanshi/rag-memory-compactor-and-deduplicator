@@ -1,0 +1,19 @@
+# Prepared questions for the side-by-side demo.
+# One per line; lines starting with # are ignored.
+#
+# The first two are the ones to use in front of judges: both target material
+# that sits in the overlapping page ranges, so the "before" side reliably shows
+# duplicate hits.
+
+What conditions must local governments meet to be eligible for grants?
+How are mitigation funds and disaster risk assessment institutionalised?
+What are the floor rate conditions on property taxes for urban local bodies?
+What criteria and weights are used for horizontal devolution?
+Why was the share of a State's GSDP included among the devolution criteria?
+Did the Commission recommend revenue deficit grants to the States?
+What is the urbanisation premium and how much has been allocated to it?
+How is the Special Infrastructure Component for urban local bodies funded?
+How are basic and performance grants to local bodies split?
+Which constitutional articles govern grants-in-aid to the States?
+How many central public sector enterprises are under liquidation or closure?
+What is the status of DISCOM debt according to the report?

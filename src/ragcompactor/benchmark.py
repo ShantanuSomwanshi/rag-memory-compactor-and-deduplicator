@@ -17,8 +17,53 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 
-from ragcompactor.backends import Embedder, VectorStore
-from ragcompactor.core import count_tokens, tokenizer_is_exact
+import numpy as np
+
+from ragcompactor.backends import Embedder, InMemoryStore, VectorStore
+from ragcompactor.core import Chunk, count_tokens, tokenizer_is_exact
+
+
+def rebuild_before_store(compactor) -> InMemoryStore:
+    """Reconstruct the pre-compaction index from the live store plus the archive.
+
+    Every merge archived its originals *with their embedding vectors*, so the
+    index as it stood before compaction is exactly:
+
+        (live store - merged chunks) + (all archived originals)
+
+    Rebuilding it costs no extra storage and needs no re-embedding - and the
+    fact that it is possible at all is the strongest statement of what the
+    archive guarantees: compaction is fully reversible, not merely logged.
+    """
+    before = InMemoryStore()
+    live_merges = compactor.archive.list_merges(include_undone=False)
+    merged_ids = {m.merged_chunk_id for m in live_merges}
+
+    chunks: list[Chunk] = []
+    vectors: list[np.ndarray] = []
+    seen: set[str] = set()
+
+    for chunk in compactor.store.all_chunks():
+        if chunk.id in merged_ids or chunk.id in seen:
+            continue
+        vec = compactor.store.get_vector(chunk.id)
+        if vec is None:
+            continue
+        seen.add(chunk.id)
+        chunks.append(chunk)
+        vectors.append(np.asarray(vec, dtype=np.float32))
+
+    for merge in live_merges:
+        for chunk, vec in compactor.archive.originals_for(merge.merge_id):
+            if vec is None or chunk.id in seen:
+                continue
+            seen.add(chunk.id)
+            chunks.append(chunk)
+            vectors.append(np.asarray(vec, dtype=np.float32))
+
+    if chunks:
+        before.add(chunks, np.vstack(vectors))
+    return before
 
 
 @dataclass

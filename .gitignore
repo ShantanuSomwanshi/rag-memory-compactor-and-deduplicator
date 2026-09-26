@@ -16,6 +16,6 @@ htmlcov/
 chroma/
 ragcompactor.json
 
-# your corpus - keep the folder, ignore everything you put in it
+# corpus - keep the folder, ignore its contents
 data/*
 !data/.gitkeep

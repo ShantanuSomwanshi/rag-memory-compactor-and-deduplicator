@@ -36,6 +36,8 @@ llm = ["litellm>=1.30"]
 tokens = ["tiktoken>=0.5"]
 # PDF ingestion
 pdf = ["pypdf>=4.0"]
+# Side-by-side retrieval demo
+ui = ["streamlit>=1.30"]
 # Everything needed for a real run
 all = [
     "chromadb>=0.4.22",
@@ -44,7 +46,7 @@ all = [
     "tiktoken>=0.5",
     "pypdf>=4.0",
 ]
-dev = ["pytest>=7.4", "pytest-cov>=4.1", "py>=1.11"]
+dev = ["pytest>=7.4", "pytest-cov>=4.1"]
 
 [project.scripts]
 ragcompactor = "ragcompactor.cli:app"

@@ -10,8 +10,10 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from pathlib import Path
+import functools
 import json
 import sqlite3
+import threading
 import uuid
 
 import numpy as np
@@ -54,17 +56,38 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+def _locked(method):
+    """Serialize a method on the archive's own lock.
+
+    The connection is opened with ``check_same_thread=False`` so a UI or web
+    process can reuse one Archive across request threads. That makes the lock
+    this decorator applies necessary rather than optional: sqlite3 will happily
+    let two threads interleave statements on one connection, and a reentrant
+    lock is what keeps a run's writes atomic (reentrant because ``list_merges``
+    calls ``get_merge``).
+    """
+
+    @functools.wraps(method)
+    def wrapper(self, *args, **kwargs):
+        with self._lock:
+            return method(self, *args, **kwargs)
+
+    return wrapper
+
+
 class Archive:
     """Durable record of merges, and the source of truth for undo."""
 
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(str(self.path))
+        self._lock = threading.RLock()
+        self._conn = sqlite3.connect(str(self.path), check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._conn.executescript(SCHEMA)
         self._conn.commit()
 
+    @_locked
     def close(self) -> None:
         self._conn.close()
 
@@ -75,6 +98,7 @@ class Archive:
         self.close()
 
     # --- writing -----------------------------------------------------------
+    @_locked
     def start_run(self, config_json: str = "") -> str:
         run_id = uuid.uuid4().hex[:12]
         self._conn.execute(
@@ -84,6 +108,7 @@ class Archive:
         self._conn.commit()
         return run_id
 
+    @_locked
     def record_merge(
         self,
         run_id: str,
@@ -127,6 +152,7 @@ class Archive:
         )
 
     # --- reading -----------------------------------------------------------
+    @_locked
     def list_runs(self) -> list[dict]:
         rows = self._conn.execute(
             "SELECT r.run_id, r.created_at,"
@@ -136,6 +162,7 @@ class Archive:
         ).fetchall()
         return [dict(r) for r in rows]
 
+    @_locked
     def get_merge(self, merge_id: str) -> MergeRecord | None:
         row = self._conn.execute(
             "SELECT * FROM merges WHERE merge_id = ?", (merge_id,)
@@ -158,6 +185,7 @@ class Archive:
             undone=bool(row["undone"]),
         )
 
+    @_locked
     def list_merges(self, run_id: str | None = None, include_undone: bool = True) -> list[MergeRecord]:
         sql = "SELECT merge_id FROM merges"
         params: tuple = ()
@@ -173,6 +201,7 @@ class Archive:
         merges = [self.get_merge(r["merge_id"]) for r in self._conn.execute(sql, params)]
         return [m for m in merges if m is not None]
 
+    @_locked
     def originals_for(self, merge_id: str) -> list[tuple[Chunk, np.ndarray | None]]:
         rows = self._conn.execute(
             "SELECT * FROM originals WHERE merge_id = ? ORDER BY id", (merge_id,)
@@ -196,6 +225,7 @@ class Archive:
             out.append((chunk, vector))
         return out
 
+    @_locked
     def merges_containing(self, chunk_ids: list[str]) -> list[str]:
         """Ids of live merges that consumed any of these chunks.
 
@@ -219,11 +249,13 @@ class Archive:
             out.extend(r["merge_id"] for r in rows)
         return sorted(set(out))
 
+    @_locked
     def mark_undone(self, merge_id: str) -> None:
         self._conn.execute("UPDATE merges SET undone = 1 WHERE merge_id = ?", (merge_id,))
         self._conn.commit()
 
     # --- stats -------------------------------------------------------------
+    @_locked
     def stats(self) -> dict:
         row = self._conn.execute(
             "SELECT (SELECT COUNT(*) FROM runs) AS runs,"
