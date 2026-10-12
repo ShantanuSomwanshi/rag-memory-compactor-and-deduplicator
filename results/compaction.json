@@ -1,0 +1,19 @@
+{
+  "run_id": "8b915d053fd3",
+  "chunks_before": 126,
+  "chunks_after": 104,
+  "chunks_removed": 22,
+  "reduction_pct": 17.46,
+  "candidate_groups": 22,
+  "validated_groups": 22,
+  "rejected_groups": 0,
+  "refined_groups": 0,
+  "chunks_merged": 44,
+  "chunks_archived": 44,
+  "summarization_tokens": 0,
+  "lossless_groups": 22,
+  "llm_groups": 0,
+  "failed_groups": 0,
+  "last_error": "",
+  "dry_run": false
+}

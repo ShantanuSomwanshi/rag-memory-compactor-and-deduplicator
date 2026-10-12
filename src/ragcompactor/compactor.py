@@ -21,7 +21,7 @@ from ragcompactor.ingest import (
     file_fingerprint,
     iter_source_files,
 )
-from ragcompactor.pipeline import find_candidate_groups, validate_group
+from ragcompactor.pipeline import find_candidate_groups, lossless_merge, validate_group
 
 
 class Compactor:
@@ -120,7 +120,9 @@ class Compactor:
         return len(present)
 
     # --- compaction --------------------------------------------------------
-    def _merged_chunk(self, text: str, originals: list[Chunk], run_id: str) -> Chunk:
+    def _merged_chunk(
+        self, text: str, originals: list[Chunk], run_id: str, method: str = "llm"
+    ) -> Chunk:
         sources = sorted({c.source for c in originals if c.source})
         return Chunk.create(
             text,
@@ -129,6 +131,7 @@ class Compactor:
             merged=True,
             merged_from=[c.id for c in originals],
             merged_sources=sources,
+            merge_method=method,
             run_id=run_id,
         )
 
@@ -177,26 +180,42 @@ class Compactor:
                 report.chunks_merged += len(originals)
                 continue
 
-            try:
-                result = self.summarizer.summarize([c.text for c in originals])
-            except Exception as exc:
-                # A provider failure (rate limit, timeout, outage) must not throw
-                # away the merges this run has already committed. Record it, and
-                # give up only once failures look persistent rather than isolated.
-                report.failed_groups += 1
-                report.validated_groups -= 1
-                report.last_error = f"{type(exc).__name__}: {exc}"[:300]
-                if report.failed_groups >= cfg.max_group_failures:
-                    break
-                continue
+            # Try to collapse the group for free before reaching for the model.
+            # Chunks that are identical, or where one contains the others, need
+            # no summarization at all - and paying a model to rewrite two
+            # identical paragraphs into one is the most avoidable cost here.
+            merged_text: str | None = None
+            method = "llm"
+            if cfg.lossless_merges:
+                merged_text = lossless_merge([c.text for c in originals])
+                if merged_text is not None:
+                    method = "lossless"
+                    report.lossless_groups += 1
 
-            report.summarization_tokens += result.total_tokens
-            if not result.text.strip():
-                report.rejected_groups += 1
-                report.validated_groups -= 1
-                continue
+            if merged_text is None:
+                try:
+                    result = self.summarizer.summarize([c.text for c in originals])
+                except Exception as exc:
+                    # A provider failure (rate limit, timeout, outage) must not
+                    # throw away the merges this run has already committed.
+                    # Record it, and give up only once failures look persistent
+                    # rather than isolated.
+                    report.failed_groups += 1
+                    report.validated_groups -= 1
+                    report.last_error = f"{type(exc).__name__}: {exc}"[:300]
+                    if report.failed_groups >= cfg.max_group_failures:
+                        break
+                    continue
 
-            merged = self._merged_chunk(result.text, originals, run_id)
+                report.summarization_tokens += result.total_tokens
+                if not result.text.strip():
+                    report.rejected_groups += 1
+                    report.validated_groups -= 1
+                    continue
+                merged_text = result.text
+                report.llm_groups += 1
+
+            merged = self._merged_chunk(merged_text, originals, run_id, method)
             vectors = {
                 c.id: v
                 for c in originals

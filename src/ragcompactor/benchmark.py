@@ -234,6 +234,8 @@ def build_report(
     after_retrieval: RetrievalStats,
     compaction_tokens: int,
     token_model: str = "gpt-4o-mini",
+    lossless_groups: int = 0,
+    llm_groups: int | None = None,
 ) -> BenchmarkReport:
     report = BenchmarkReport(
         before_corpus=before_corpus,
@@ -249,6 +251,13 @@ def build_report(
                 "nothing was merged - the store was already compacted, or no group "
                 "cleared the validation gate. Undo previous runs and re-run this "
                 "benchmark on an uncompacted store to get a real comparison"
+            )
+        elif lossless_groups and not llm_groups:
+            report.notes.append(
+                f"compaction cost 0 tokens - all {lossless_groups} merge(s) were "
+                "proved lossless by containment, so the model was never called. The "
+                "saving is positive from the very first query and break-even does "
+                "not apply to this run"
             )
         else:
             report.notes.append(

@@ -1,0 +1,11 @@
+Compaction benchmark
+====================
+  corpus chunks      104 -> 104 (0 removed)
+  corpus tokens      17196 -> 17196 (0.0% smaller)
+  context per query  846.1 -> 846.1 tokens (0.0% smaller)
+  saved per query    0.0 tokens
+  compaction cost    0 tokens (one-off)
+  break-even         never - compaction did not reduce context
+  NOTE: nothing was merged - the store was already compacted, or no group cleared the validation gate. Undo previous runs and re-run this benchmark on an uncompacted store to get a real comparison
+
+  (compaction run fea4df17be30; undo with ragcompactor undo --run fea4df17be30)

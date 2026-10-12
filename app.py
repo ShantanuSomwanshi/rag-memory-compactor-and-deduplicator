@@ -208,6 +208,161 @@ def generate_answer(question: str, hits: list[dict], cfg: CompactorConfig) -> di
 
 
 # ---------------------------------------------------------------------------
+# merge provenance - where each sentence of a merged chunk came from
+# ---------------------------------------------------------------------------
+
+PROV_COLORS = [
+    ("#D7EBE8", "#06433F"),
+    ("#DCE4F2", "#24456B"),
+    ("#E2EEDB", "#3A5C25"),
+    ("#EDE1F2", "#52336C"),
+    ("#F6E9D5", "#6E5010"),
+]
+PROV_UNMATCHED = ("#F8DADA", "#8E2626")
+
+
+def all_sentences(text: str) -> list[str]:
+    """Every sentence, including short ones - nothing is dropped from display."""
+    return [s.strip() for s in re.split(r"(?<=[.!?])\s+", text) if s.strip()]
+
+
+def merge_coverage(originals: list[Chunk], merged_text: str, embedder, threshold: float):
+    """For every sentence of every original, did it survive into the merge?
+
+    The mirror of :func:`provenance`. That one asks "where did this merged
+    sentence come from"; this one asks "did this original sentence get carried
+    over" - and a No here is the thing that actually matters, because it is
+    information the store no longer holds.
+    """
+    merged_sents = [s for s in all_sentences(merged_text) if len(s) > 25]
+    per_original = []
+
+    if not merged_sents:
+        return [[(s, "short", 0.0) for s in all_sentences(c.text)] for c in originals]
+
+    merged_vecs = embedder.embed(merged_sents)
+    for chunk in originals:
+        sents = all_sentences(chunk.text)
+        long_idx = [i for i, sentence in enumerate(sents) if len(sentence) > 25]
+        rows = [(sentence, "short", 0.0) for sentence in sents]
+        if long_idx:
+            vecs = embedder.embed([sents[i] for i in long_idx])
+            sims = vecs @ merged_vecs.T
+            for row, i in enumerate(long_idx):
+                best = float(np.max(sims[row]))
+                rows[i] = (sents[i], best >= threshold, best)
+        per_original.append(rows)
+    return per_original
+
+
+def render_coverage(rows, origin_idx: int) -> tuple[int, int]:
+    """Paint an original: carried-over sentences in its colour, dropped ones red."""
+    bg_keep, fg_keep = PROV_COLORS[origin_idx % len(PROV_COLORS)]
+    bg_drop, fg_drop = PROV_UNMATCHED
+    parts, kept, dropped = [], 0, 0
+    for sentence, state, sim in rows:
+        if state == "short":
+            parts.append(f"<span style='opacity:.75'>{sentence}</span>")
+            continue
+        if state:
+            kept += 1
+            parts.append(
+                f"<span style='background:{bg_keep};color:{fg_keep};padding:1px 4px;"
+                f"border-radius:2px' title='carried into the merge (similarity "
+                f"{sim:.2f})'>{sentence}</span>"
+            )
+        else:
+            dropped += 1
+            parts.append(
+                f"<span style='background:{bg_drop};color:{fg_drop};padding:1px 4px;"
+                f"border-radius:2px' title='NOT carried into the merge (best match "
+                f"{sim:.2f})'>{sentence}</span>"
+            )
+    st.markdown(f"<div class='rc-text'>{' '.join(parts)}</div>", unsafe_allow_html=True)
+    return kept, dropped
+
+
+def provenance(merged_text: str, originals: list[Chunk], embedder, threshold: float):
+    """Trace every sentence of a merged chunk back to the original it came from.
+
+    Each sentence of the merge is matched against every sentence of every
+    archived original; the closest one wins. A sentence matching nothing closely
+    is the interesting case - it means the model wrote something the sources did
+    not say, which is the failure mode summarization-based compaction has to be
+    checked for.
+    """
+    merged_sents = all_sentences(merged_text)
+    # Short fragments ("See Table 8.8.") carry too little signal to match on, but
+    # they must still be displayed - dropping them would make the merged chunk
+    # look shorter than it is, in the very view meant to prove nothing was lost.
+    traceable = [i for i, s in enumerate(merged_sents) if len(s) > 25]
+
+    origin_sents: list[str] = []
+    origin_of: list[int] = []
+    for idx, chunk in enumerate(originals):
+        for sentence in all_sentences(chunk.text):
+            if len(sentence) > 25:
+                origin_sents.append(sentence)
+                origin_of.append(idx)
+
+    if not traceable or not origin_sents:
+        return [(s, "short", 0.0) for s in merged_sents]
+
+    merged_vecs = embedder.embed([merged_sents[i] for i in traceable])
+    origin_vecs = embedder.embed(origin_sents)
+    sims = merged_vecs @ origin_vecs.T
+
+    best_for = {}
+    for row, i in enumerate(traceable):
+        j = int(np.argmax(sims[row]))
+        best = float(sims[row][j])
+        best_for[i] = (origin_of[j] if best >= threshold else None, best)
+
+    return [
+        (sentence, *best_for.get(i, ("short", 0.0)))
+        for i, sentence in enumerate(merged_sents)
+    ]
+
+
+def render_provenance(traced) -> int:
+    """Paint merged text, each sentence tinted by source. Returns untraced count."""
+    parts, untraced = [], 0
+    for sentence, origin, sim in traced:
+        if origin == "short":
+            parts.append(f"<span style='opacity:.75'>{sentence}</span>")
+            continue
+        if origin is None:
+            bg, fg = PROV_UNMATCHED
+            tip = f"no close match in any original (best {sim:.2f})"
+            untraced += 1
+        else:
+            bg, fg = PROV_COLORS[origin % len(PROV_COLORS)]
+            tip = f"from original {origin + 1} (similarity {sim:.2f})"
+        parts.append(
+            f"<span style='background:{bg};color:{fg};padding:1px 4px;"
+            f"border-radius:2px' title='{tip}'>{sentence}</span>"
+        )
+    st.markdown(f"<div class='rc-text'>{' '.join(parts)}</div>", unsafe_allow_html=True)
+    return untraced
+
+
+def render_prov_legend(n_originals: int, untraced: int) -> None:
+    chips = []
+    for i in range(n_originals):
+        bg, fg = PROV_COLORS[i % len(PROV_COLORS)]
+        chips.append(
+            f"<span style='background:{bg};color:{fg};padding:2px 9px;border-radius:3px;"
+            f"font-size:11.5px;font-weight:700;margin-right:6px'>original {i + 1}</span>"
+        )
+    bg, fg = PROV_UNMATCHED
+    chips.append(
+        f"<span style='background:{bg};color:{fg};padding:2px 9px;border-radius:3px;"
+        f"font-size:11.5px;font-weight:700'>not traceable &middot; {untraced}</span>"
+    )
+    st.markdown("".join(chips), unsafe_allow_html=True)
+
+
+# ---------------------------------------------------------------------------
 # rendering
 # ---------------------------------------------------------------------------
 
@@ -246,6 +401,17 @@ def render_hit(hit: dict, promoted_ids: set[str]) -> None:
             f"<div class='rc-text'>{text[:400]}{'...' if len(text) > 400 else ''}</div>",
             unsafe_allow_html=True,
         )
+        if chunk.is_merged:
+            merge_id = MERGE_BY_CHUNK.get(hit["id"])
+            if merge_id:
+                with st.expander("where each sentence came from"):
+                    originals = [c for c, _v in compactor.archive.originals_for(merge_id)]
+                    traced = provenance(
+                        chunk.text, originals, compactor.embedder, PROV_THRESHOLD
+                    )
+                    untraced = render_provenance(traced)
+                    st.write("")
+                    render_prov_legend(len(originals), untraced)
         if len(text) > 400:
             with st.expander("full text"):
                 st.write(text)
@@ -269,6 +435,7 @@ except Exception as exc:  # pragma: no cover - surfaced in the UI
 
 cfg = compactor.config
 merges = compactor.archive.list_merges(include_undone=False)
+MERGE_BY_CHUNK = {m.merged_chunk_id: m.merge_id for m in merges}
 
 with st.sidebar:
     st.subheader("Index")
@@ -282,6 +449,11 @@ with st.sidebar:
     answer_threshold = st.slider(
         "answer-repetition sensitivity", 0.50, 0.95, 0.68, 0.01,
         help="Two sentences in an answer above this similarity are flagged as a repeat.",
+    )
+    PROV_THRESHOLD = st.slider(
+        "merge-provenance sensitivity", 0.40, 0.95, 0.60, 0.01,
+        help="A merged sentence must match an original this closely to be traced "
+        "back to it. Below this it is flagged as not traceable.",
     )
     st.divider()
     st.subheader("Thresholds")
@@ -408,40 +580,93 @@ with tab_merges:
 
         before_tok = sum(count_tokens(c.text, cfg.token_model) for c, _ in originals)
         after_tok = count_tokens(record.merged_text, cfg.token_model)
-        cols = st.columns(3)
+        _coverage_preview = merge_coverage(
+            [c for c, _v in originals], record.merged_text, compactor.embedder, PROV_THRESHOLD
+        )
+        _dropped = sum(
+            1 for rows in _coverage_preview for _s, state, _sim in rows if state is False
+        )
+        cols = st.columns(4)
         cols[0].metric("Chunks", f"{len(originals)} → 1")
         cols[1].metric("Tokens", after_tok, delta=after_tok - before_tok)
         cols[2].metric(
             "Reduction",
             f"{(100.0 * (before_tok - after_tok) / before_tok if before_tok else 0):.0f}%",
         )
+        cols[3].metric("Sentences dropped", _dropped)
 
         left, right = st.columns(2)
+        coverage = merge_coverage(
+            [c for c, _v in originals], record.merged_text, compactor.embedder, PROV_THRESHOLD
+        )
+        total_dropped = sum(
+            1 for rows in coverage for _s, state, _sim in rows if state is False
+        )
+
         with left:
             st.markdown("**Originals (archived)**")
-            for i, (chunk, _vec) in enumerate(originals, 1):
+            st.caption(
+                "Sentences carried into the merge are tinted in that original's "
+                "colour. Red means the sentence did not survive - that is real "
+                "information the store no longer holds."
+            )
+            for i, (chunk, _vec) in enumerate(originals):
                 with st.container(border=True):
+                    bg, fg = PROV_COLORS[i % len(PROV_COLORS)]
                     st.markdown(
-                        f"<div class='rc-meta'>{i}/{len(originals)} · "
+                        f"<span style='background:{bg};color:{fg};padding:2px 9px;"
+                        f"border-radius:3px;font-size:11.5px;font-weight:700'>"
+                        f"original {i + 1}</span>"
+                        f"<span class='rc-meta'> &nbsp; "
                         f"{Path(chunk.source).name if chunk.source else '?'} "
                         f"#{chunk.ordinal} · "
-                        f"{count_tokens(chunk.text, cfg.token_model)} tok</div>",
+                        f"{count_tokens(chunk.text, cfg.token_model)} tok</span>",
                         unsafe_allow_html=True,
                     )
-                    st.markdown(
-                        f"<div class='rc-text'>{' '.join(chunk.text.split())}</div>",
-                        unsafe_allow_html=True,
-                    )
+                    kept, dropped = render_coverage(coverage[i], i)
+                    if dropped:
+                        st.markdown(
+                            f"<div class='rc-meta' style='color:#8E2626;font-weight:600'>"
+                            f"{kept} of {kept + dropped} sentences carried over · "
+                            f"{dropped} dropped</div>",
+                            unsafe_allow_html=True,
+                        )
+                    else:
+                        st.markdown(
+                            f"<div class='rc-meta' style='color:#07514F;font-weight:600'>"
+                            f"all {kept} sentences carried over</div>",
+                            unsafe_allow_html=True,
+                        )
         with right:
             st.markdown("**Merged result (live in the store)**")
+            st.caption(
+                "Every sentence is tinted by the original it came from. Anything "
+                "shown in red matched no original closely - the model wrote it."
+            )
             with st.container(border=True):
                 st.markdown(
                     f"<div class='rc-meta'>{after_tok} tok · {record.merged_chunk_id}</div>",
                     unsafe_allow_html=True,
                 )
-                st.markdown(
-                    f"<div class='rc-text'>{' '.join(record.merged_text.split())}</div>",
-                    unsafe_allow_html=True,
+                traced = provenance(
+                    record.merged_text,
+                    [c for c, _v in originals],
+                    compactor.embedder,
+                    PROV_THRESHOLD,
+                )
+                untraced = render_provenance(traced)
+                st.write("")
+                render_prov_legend(len(originals), untraced)
+            if untraced:
+                st.warning(
+                    f"{untraced} sentence(s) could not be traced to any original at "
+                    f"the current sensitivity. Lower the slider, or read them closely - "
+                    "an untraceable sentence is either a paraphrase or an invention."
+                )
+            else:
+                st.success(
+                    "Every sentence in the merged chunk traces back to one of the "
+                    "originals. Nothing was invented."
                 )
             if st.button("Undo this merge", key=f"undo-{merge_id}"):
                 if compactor.undo_merge(merge_id):

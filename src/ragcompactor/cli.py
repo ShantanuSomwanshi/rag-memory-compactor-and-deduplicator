@@ -170,6 +170,8 @@ def compact(
         typer.echo(f"  chunks             {d['chunks_before']} -> {d['chunks_after']} "
                    f"({d['reduction_pct']}% smaller)")
         typer.echo(f"  archived           {d['chunks_archived']}")
+        typer.echo(f"  merged for free    {d['lossless_groups']} (identical/contained - no LLM call)")
+        typer.echo(f"  merged by the LLM  {d['llm_groups']}")
         typer.echo(f"  summarizer tokens  {d['summarization_tokens']}")
         if d["failed_groups"]:
             typer.echo(f"  FAILED groups      {d['failed_groups']}")
@@ -304,6 +306,8 @@ def benchmark(
             after_retrieval,
             compaction_tokens=report.summarization_tokens,
             token_model=cfg.token_model,
+            lossless_groups=report.lossless_groups,
+            llm_groups=report.llm_groups,
         )
         if json_out:
             payload = result.to_dict()

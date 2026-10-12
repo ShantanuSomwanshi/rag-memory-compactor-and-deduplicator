@@ -88,6 +88,12 @@ class CompactorConfig(BaseModel):
         le=1.0,
         description="Minimum pairwise cosine similarity required across a group before it may be merged.",
     )
+    lossless_merges: bool = Field(
+        default=True,
+        description="Before calling the LLM, check whether the group can be "
+        "collapsed by exact containment - identical chunks, or one chunk that "
+        "contains the others. Those merge for free and lose nothing.",
+    )
     refine_rejected_groups: bool = Field(
         default=True,
         description="If a group fails validation, keep the largest subset that passes instead of discarding it.",
@@ -292,6 +298,8 @@ class CompactionReport:
     chunks_merged: int = 0
     chunks_archived: int = 0
     summarization_tokens: int = 0
+    lossless_groups: int = 0
+    llm_groups: int = 0
     failed_groups: int = 0
     last_error: str = ""
     dry_run: bool = False
@@ -321,6 +329,8 @@ class CompactionReport:
             "chunks_merged": self.chunks_merged,
             "chunks_archived": self.chunks_archived,
             "summarization_tokens": self.summarization_tokens,
+            "lossless_groups": self.lossless_groups,
+            "llm_groups": self.llm_groups,
             "failed_groups": self.failed_groups,
             "last_error": self.last_error,
             "dry_run": self.dry_run,

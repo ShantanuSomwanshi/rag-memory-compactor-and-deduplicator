@@ -11,6 +11,7 @@ proposes, validation disposes.
 from __future__ import annotations
 
 from itertools import combinations
+import re
 
 import networkx as nx
 import numpy as np
@@ -248,3 +249,49 @@ def validate_groups(
     refine: bool = True,
 ) -> list[ValidationOutcome]:
     return [validate_group(store, g, threshold=threshold, refine=refine) for g in groups]
+
+
+# ---------------------------------------------------------------------------
+# lossless merging - collapsing a group without asking a model
+# ---------------------------------------------------------------------------
+
+_SENTENCE_SPLIT = re.compile(r"(?<=[.!?])\s+")
+
+
+def _sentences(text: str) -> list[str]:
+    return [s.strip() for s in _SENTENCE_SPLIT.split(text) if s.strip()]
+
+
+def lossless_merge(texts: list[str]) -> str | None:
+    """Collapse a group without an LLM, but only when that provably loses nothing.
+
+    Two cases qualify:
+
+    * every chunk is the same text once whitespace is normalised, or
+    * one chunk literally contains every sentence of all the others.
+
+    In both, keeping that one chunk and discarding the rest preserves every
+    word - no summarization, no cost, and nothing to verify afterwards. Any
+    other group returns ``None`` and goes to the model, because deciding what
+    may safely be dropped is not a judgement a string comparison can make.
+
+    This matters more than it sounds: duplicates that arrive from overlapping
+    excerpts or a file saved twice are *identical*, and paying an LLM to rewrite
+    two identical paragraphs into one is pure waste.
+    """
+    if len(texts) < 2:
+        return None
+
+    normalised = [" ".join(t.split()) for t in texts]
+    if len(set(normalised)) == 1:
+        return texts[0]
+
+    longest = max(range(len(texts)), key=lambda i: len(normalised[i]))
+    haystack = normalised[longest].casefold()
+    for i, text in enumerate(normalised):
+        if i == longest:
+            continue
+        for sentence in _sentences(text):
+            if sentence.casefold() not in haystack:
+                return None
+    return texts[longest]
