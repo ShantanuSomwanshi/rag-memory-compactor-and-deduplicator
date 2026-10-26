@@ -45,6 +45,7 @@ all = [
     "litellm>=1.30",
     "tiktoken>=0.5",
     "pypdf>=4.0",
+    "streamlit>=1.30",
 ]
 dev = ["pytest>=7.4", "pytest-cov>=4.1"]
 

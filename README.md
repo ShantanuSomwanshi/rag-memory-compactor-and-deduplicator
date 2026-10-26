@@ -52,18 +52,33 @@ The weak members are dropped and the tight core still merges.
 ## Install
 
 ```bash
-pip install -r requirements.txt      # or: pip install -e ".[all]"
-pip install -e .                     # puts the ragcompactor command on PATH
+python -m venv .venv
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+python -m pip install -e .
 ```
 
-For development: `pip install -r requirements-dev.txt`. Extras are granular if
-you want a smaller install: `chroma`, `embed`, `llm`, `tokens`, `pdf`.
+For development, install `requirements-dev.txt` instead of `requirements.txt`.
+The equivalent package-extra installs are `pip install -e ".[all]"` for the
+complete runtime (including the Streamlit demo), or `pip install -e ".[all,dev]"`
+for runtime and test dependencies. Extras are granular if you want a smaller
+install: `chroma`, `embed`, `llm`, `tokens`, `pdf`, and `ui`.
+
+To create a local configuration from the portable example:
+
+```bash
+cp ragcompactor.example.json ragcompactor.json
+```
+
+Keep the generated `ragcompactor.json` local; it and the `.ragcompactor/`
+runtime data are intentionally gitignored.
 
 ## API keys
 
-Copy `.env.example` to `.env` and fill in the key for whichever provider your
-`llm_model` uses. Every command loads `.env` automatically, and `.env` is
-gitignored so keys are never committed:
+Copy `.env.example` to `.env`, uncomment the matching provider line, and replace
+the placeholder with your key. The key must match the provider configured by
+`llm_model`. Every CLI command loads `.env` automatically; `.env` is gitignored
+so secrets are not committed:
 
 ```bash
 cp .env.example .env      # then edit it

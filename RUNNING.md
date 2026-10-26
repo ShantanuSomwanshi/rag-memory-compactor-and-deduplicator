@@ -100,12 +100,20 @@ ragcompactor demo --workdir .ragcompactor-demo
 
 ## 5. Configure a real run
 
-The checked-in example configuration is in `ragcompactor.json`. It uses a
-persistent Chroma store, the `all-MiniLM-L6-v2` sentence-transformer, and a
-LiteLLM model. Edit `llm_model` to match the provider you intend to use.
+Create a local config from the portable example. It uses a persistent Chroma
+store, the `all-MiniLM-L6-v2` sentence-transformer, and OpenAI's `gpt-4o-mini`
+through LiteLLM:
 
-For a hosted provider, copy the environment template and fill in only the
-matching key:
+```powershell
+Copy-Item ragcompactor.example.json ragcompactor.json
+```
+
+Edit `llm_model` in `ragcompactor.json` if you use another provider or model.
+The actual `ragcompactor.json` and runtime store are intentionally not tracked;
+this keeps machine-specific settings and local data out of the repository.
+
+For a hosted provider, copy the environment template, uncomment the matching
+provider line, and replace its placeholder:
 
 ```powershell
 Copy-Item .env.example .env
@@ -115,9 +123,9 @@ notepad .env
 Examples:
 
 ```text
-gpt-4o-mini                         -> OPENAI_API_KEY
-claude-3-5-haiku-20241022           -> ANTHROPIC_API_KEY
-groq/llama-3.1-8b-instant           -> GROQ_API_KEY
+gpt-4o-mini                    -> OPENAI_API_KEY
+claude-3-5-haiku-20241022      -> ANTHROPIC_API_KEY
+groq/llama-3.1-8b-instant      -> GROQ_API_KEY
 ```
 
 For a local Ollama model, set `llm_model` to something such as

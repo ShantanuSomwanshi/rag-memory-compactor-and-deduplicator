@@ -25,6 +25,7 @@ from ragcompactor.backends import VectorStore
 from ragcompactor.benchmark import rebuild_before_store
 from ragcompactor.compactor import Compactor
 from ragcompactor.core import Chunk, CompactorConfig, count_tokens
+from ragcompactor.citations import format_citations
 
 st.set_page_config(page_title="RAG Memory Compactor", layout="wide")
 
@@ -193,6 +194,7 @@ def duplicate_answer_sources(
 
 
 def render_answer(text: str, embedder, threshold: float, hits: list[dict]) -> int:
+    text = format_citations(text)
     sents, repeats = answer_redundancy(text, embedder, threshold)
     duplicate_sources = duplicate_answer_sources(text, hits, embedder, threshold)
     if not sents:
