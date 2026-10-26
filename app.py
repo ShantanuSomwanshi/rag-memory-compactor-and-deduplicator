@@ -10,7 +10,9 @@ originals together with their embedding vectors.
 
 from __future__ import annotations
 
+import html
 import itertools
+import json
 import re
 from pathlib import Path
 
@@ -40,9 +42,12 @@ st.markdown(
       [data-testid="stMetricLabel"] { font-size: 0.85rem; font-weight: 600; }
       .rc-text { font-size: 14.5px; line-height: 1.55; color: inherit; }
       .rc-meta { font-size: 12.5px; color: #5A6A6A; }
-      .rc-dup  { background: #F6E3D8; border-left: 3px solid #A3502E;
-                 padding: 2px 6px; border-radius: 2px; }
-      .rc-ans  { font-size: 15px; line-height: 1.7; }
+      .rc-dup  { background: #F6E3D8; color: #3B241C !important;
+                 border-left: 3px solid #A3502E; padding: 2px 6px;
+                 border-radius: 2px; box-decoration-break: clone;
+                 -webkit-box-decoration-break: clone; }
+      .rc-ans  { font-size: 15px; line-height: 1.7; min-width: 0;
+                 max-width: 100%; overflow-wrap: anywhere; }
     </style>
     """,
     unsafe_allow_html=True,
@@ -159,23 +164,63 @@ def answer_redundancy(text: str, embedder, threshold: float) -> tuple[list[str],
     return sents, repeats
 
 
-def render_answer(text: str, embedder, threshold: float) -> int:
+def duplicate_answer_sources(
+    text: str, hits: list[dict], embedder, threshold: float
+) -> dict[int, tuple[int, float]]:
+    """Match answer statements to statements in duplicate retrieved chunks."""
+    answer_sents = sentences_of(text)
+    source_sents = [
+        (hit["rank"], sentence)
+        for hit in hits
+        if hit["duplicate_of"] is not None
+        for sentence in all_sentences(hit["chunk"].text)
+        if len(sentence) > 25
+    ]
+    if not answer_sents or not source_sents:
+        return {}
+
+    vectors = embedder.embed(
+        answer_sents + [sentence for _rank, sentence in source_sents]
+    )
+    similarities = vectors[: len(answer_sents)] @ vectors[len(answer_sents) :].T
+    matches = {}
+    for idx, row in enumerate(similarities):
+        source_idx = int(np.argmax(row))
+        similarity = float(row[source_idx])
+        if similarity >= threshold:
+            matches[idx] = (source_sents[source_idx][0], similarity)
+    return matches
+
+
+def render_answer(text: str, embedder, threshold: float, hits: list[dict]) -> int:
     sents, repeats = answer_redundancy(text, embedder, threshold)
+    duplicate_sources = duplicate_answer_sources(text, hits, embedder, threshold)
     if not sents:
         st.write(text)
         return 0
     parts = []
     for idx, sentence in enumerate(sents):
+        title_parts = []
         if idx in repeats:
             src, sim = repeats[idx]
+            title_parts.append(
+                f"repeats answer statement {src + 1} (similarity {sim:.2f})"
+            )
+        if idx in duplicate_sources:
+            rank, sim = duplicate_sources[idx]
+            title_parts.append(
+                f"matches duplicate retrieved chunk #{rank} (similarity {sim:.2f})"
+            )
+        safe_sentence = html.escape(sentence, quote=False)
+        if title_parts:
+            title = html.escape("; ".join(title_parts), quote=True)
             parts.append(
-                f"<span class='rc-dup' title='repeats statement {src + 1} "
-                f"(similarity {sim:.2f})'>{sentence}</span>"
+                f"<span class='rc-dup' title='{title}'>{safe_sentence}</span>"
             )
         else:
-            parts.append(sentence)
+            parts.append(safe_sentence)
     st.markdown(f"<div class='rc-ans'>{' '.join(parts)}</div>", unsafe_allow_html=True)
-    return len(repeats)
+    return len(repeats.keys() | duplicate_sources.keys())
 
 
 def build_context(hits: list[dict]) -> str:
@@ -219,6 +264,8 @@ PROV_COLORS = [
     ("#F6E9D5", "#6E5010"),
 ]
 PROV_UNMATCHED = ("#F8DADA", "#8E2626")
+ANSWER_THRESHOLD = 0.68
+PROV_THRESHOLD = 0.60
 
 
 def all_sentences(text: str) -> list[str]:
@@ -417,6 +464,87 @@ def render_hit(hit: dict, promoted_ids: set[str]) -> None:
                 st.write(text)
 
 
+def render_retrieval_graph(hits: list[dict], after_store: VectorStore) -> None:
+    hits_by_rank = {hit["rank"]: hit for hit in hits}
+    pairs = []
+    for duplicate in hits:
+        duplicate_of = duplicate["duplicate_of"]
+        if duplicate_of is None:
+            continue
+        primary = hits_by_rank.get(duplicate_of[0])
+        if primary is None:
+            continue
+
+        merge = next(
+            (
+                item
+                for item in merges
+                if primary["id"] in item.original_ids
+                and duplicate["id"] in item.original_ids
+            ),
+            None,
+        )
+        result = after_store.get(merge.merged_chunk_id) if merge else None
+        if result is not None:
+            result_label = source_label(result)
+            result_text = result.text
+        elif merge is not None:
+            result_label = f"Merged result · {merge.merge_id}"
+            result_text = merge.merged_text
+        else:
+            result_label = f"Deduplicated result · kept #{primary['rank']}"
+            result_text = primary["chunk"].text
+
+        label = (
+            f"#{primary['rank']} {source_label(primary['chunk'])} + "
+            f"#{duplicate['rank']} {source_label(duplicate['chunk'])}"
+        )
+        pairs.append(
+            (label, primary, duplicate, result_label, result_text, merge is not None)
+        )
+
+    st.subheader("Retrieved chunks → compaction result")
+    if not pairs:
+        st.info("No duplicate chunk pair was found in this retrieval.")
+        return
+
+    selected = st.selectbox(
+        "Duplicate pair to visualize",
+        options=range(len(pairs)),
+        format_func=lambda index: pairs[index][0],
+        key="retrieval_graph_pair",
+    )
+    _label, primary, duplicate, result_label, result_text, was_merged = pairs[selected]
+    if was_merged:
+        st.caption("This pair was archived together in an actual compaction merge.")
+    else:
+        st.caption(
+            "These retrieved chunks matched the duplicate threshold; the higher-ranked "
+            "chunk is shown as the retained deduplication result."
+        )
+
+    dot = f"""
+    digraph retrieval {{
+      graph [rankdir=LR, bgcolor="transparent", nodesep=0.55, ranksep=0.8,
+             pad=0.2, tooltip=""];
+      node [shape=box, style="rounded,filled", fontname="sans-serif",
+            fontsize=12, margin="0.16,0.10", color="#718096",
+            fillcolor="#202733", fontcolor="#F4F6F8"];
+      edge [color="#8492A6", penwidth=1.6, arrowsize=0.8];
+      source_a [label={json.dumps(source_label(primary["chunk"]), ensure_ascii=False)},
+                tooltip={json.dumps(primary["chunk"].text, ensure_ascii=False)}];
+      source_b [label={json.dumps(source_label(duplicate["chunk"]), ensure_ascii=False)},
+                tooltip={json.dumps(duplicate["chunk"].text, ensure_ascii=False)}];
+      result [label={json.dumps(result_label, ensure_ascii=False)},
+              tooltip={json.dumps(result_text, ensure_ascii=False)},
+              fillcolor="#244A43", color="#4F9B82"];
+      source_a -> result;
+      source_b -> result;
+    }}
+    """
+    st.graphviz_chart(dot, use_container_width=True)
+
+
 # ---------------------------------------------------------------------------
 # app shell
 # ---------------------------------------------------------------------------
@@ -446,15 +574,6 @@ with st.sidebar:
     st.subheader("Retrieval")
     top_k = st.slider("chunks retrieved (top-k)", 3, 10, 5)
     want_answers = st.checkbox("Generate answers from both contexts", value=True)
-    answer_threshold = st.slider(
-        "answer-repetition sensitivity", 0.50, 0.95, 0.68, 0.01,
-        help="Two sentences in an answer above this similarity are flagged as a repeat.",
-    )
-    PROV_THRESHOLD = st.slider(
-        "merge-provenance sensitivity", 0.40, 0.95, 0.60, 0.01,
-        help="A merged sentence must match an original this closely to be traced "
-        "back to it. Below this it is flagged as not traceable.",
-    )
     st.divider()
     st.subheader("Thresholds")
     st.caption(f"**discovery ≥ {cfg.similarity_threshold}** — link possible duplicates")
@@ -532,12 +651,14 @@ with tab_compare:
             for hit in after_hits:
                 render_hit(hit, promoted)
 
+        render_retrieval_graph(before_hits, after_store)
+
         if want_answers:
             st.divider()
             st.subheader("Answers generated from each context")
             st.caption(
-                "Shaded statements repeat something already said in the same answer — "
-                "found with the same embedding comparison the compactor uses on the corpus."
+                "Shaded statements either repeat an earlier statement in the answer or "
+                "match a retrieved chunk marked as a duplicate."
             )
             a, b = st.columns(2)
             for col, hits, label in ((a, before_hits, "before"), (b, after_hits, "after")):
@@ -549,10 +670,12 @@ with tab_compare:
                         except Exception as exc:
                             st.error(f"generation failed: {exc}")
                             continue
-                    repeats = render_answer(res["text"], compactor.embedder, answer_threshold)
+                    repeats = render_answer(
+                        res["text"], compactor.embedder, ANSWER_THRESHOLD, hits
+                    )
                     st.caption(
                         f"{res['prompt_tokens']} prompt + {res['completion_tokens']} "
-                        f"completion tokens · {repeats} repeated statement(s)"
+                        f"completion tokens · {repeats} highlighted statement(s)"
                     )
 
 # ---------------------------------------------------------------------------
@@ -681,11 +804,11 @@ with tab_merges:
 # ---------------------------------------------------------------------------
 
 with tab_map:
-    st.subheader("Where the duplicates sit in embedding space")
+    st.subheader("How the chunks relate")
     st.caption(
-        "Every chunk projected to two dimensions (principal components of the "
-        "pre-compaction vectors). Illustrative, not evidential: two axes cannot "
-        "carry 384 dimensions. Duplicate pairs land on top of each other."
+        "Each dot is one text chunk. Dots closer together have more similar "
+        "content; hover over a dot to read the text. This is a simplified map, "
+        "so use it as a visual guide rather than an exact measurement."
     )
 
     merged_away = set()
@@ -709,31 +832,51 @@ with tab_map:
                 {
                     "x": float(x),
                     "y": float(y),
-                    "state": "merged away (duplicate)" if cid in merged_away else "kept as-is",
-                    "source": Path(chunk.source).name if chunk.source else "?",
-                    "text": " ".join(chunk.text.split())[:150] + "...",
+                    "status": (
+                        "Combined into a new chunk"
+                        if cid in merged_away
+                        else "Kept unchanged"
+                    ),
+                    "file": source_label(chunk),
+                    "text": chunk.text,
                 }
             )
         df = pd.DataFrame(rows)
 
-        show_after = st.checkbox("Overlay the compacted index", value=False)
+        show_after = st.checkbox(
+            "Show chunks after compaction",
+            value=False,
+            help="Adds the resulting chunks to the same map. Hover over a dot to read its text.",
+        )
         chart = (
             alt.Chart(df)
             .mark_circle(size=130, opacity=0.75)
             .encode(
-                x=alt.X("x:Q", title="component 1"),
-                y=alt.Y("y:Q", title="component 2"),
+                x=alt.X(
+                    "x:Q",
+                    title=None,
+                    axis=alt.Axis(labels=False, ticks=False, domain=False),
+                ),
+                y=alt.Y(
+                    "y:Q",
+                    title=None,
+                    axis=alt.Axis(labels=False, ticks=False, domain=False),
+                ),
                 color=alt.Color(
-                    "state:N",
+                    "status:N",
                     scale=alt.Scale(
-                        domain=["kept as-is", "merged away (duplicate)"],
+                        domain=["Kept unchanged", "Combined into a new chunk"],
                         range=["#9AAAAA", "#A3502E"],
                     ),
-                    legend=alt.Legend(title=None, orient="top"),
+                    legend=alt.Legend(title="What happened to the chunk", orient="top"),
                 ),
-                tooltip=["source", "state", "text"],
+                tooltip=[
+                    alt.Tooltip("file:N", title="Source"),
+                    alt.Tooltip("status:N", title="Status"),
+                    alt.Tooltip("text:N", title="Chunk text"),
+                ],
             )
-            .properties(height=520)
+            .properties(height=450)
         )
 
         if show_after:
@@ -744,21 +887,29 @@ with tab_map:
                 {
                     "x": float(x),
                     "y": float(y),
-                    "state": "after compaction",
-                    "source": source_label(after_store.get(cid)),
-                    "text": " ".join(after_store.get(cid).text.split())[:150] + "...",
+                    "file": source_label(after_store.get(cid)),
+                    "text": after_store.get(cid).text,
                 }
                 for (x, y), cid in zip(after_coords, after_ids)
             ]
             overlay = (
                 alt.Chart(pd.DataFrame(after_rows))
                 .mark_point(size=90, shape="cross", opacity=0.95, color="#07514F")
-                .encode(x="x:Q", y="y:Q", tooltip=["source", "text"])
+                .encode(
+                    x=alt.X("x:Q", axis=alt.Axis(labels=False, ticks=False, domain=False)),
+                    y=alt.Y("y:Q", axis=alt.Axis(labels=False, ticks=False, domain=False)),
+                    tooltip=[
+                        alt.Tooltip("file:N", title="Source"),
+                        alt.Tooltip("text:N", title="Chunk text"),
+                    ],
+                )
             )
             chart = chart + overlay
 
         st.altair_chart(chart, use_container_width=True)
+        if show_after:
+            st.caption("Teal crosses show the chunks that remain after compaction.")
         c = st.columns(3)
-        c[0].metric("Chunks before", len(ids))
-        c[1].metric("Merged away", len(merged_away))
-        c[2].metric("Chunks after", after_store.count())
+        c[0].metric("Chunks before compaction", len(ids))
+        c[1].metric("Chunks combined", len(merged_away))
+        c[2].metric("Chunks after compaction", after_store.count())
